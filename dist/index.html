@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="ChainGuard — análise de risco e monitoramento de carteiras Ethereum." />
+    <meta name="theme-color" content="#070A12" />
+    <title>ChainGuard — Segurança Ethereum</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <a class="brand" href="#dashboard" aria-label="ChainGuard — início">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 36"><path d="M16 2 5 6.6v8.8c0 7.2 4.6 13.8 11 17.6 6.4-3.8 11-10.4 11-17.6V6.6L16 2Z"/><path d="m16 8-5.2 8 5.2 3 5.2-3L16 8Zm0 12.2-5.2-3.1L16 27l5.2-9.9-5.2 3.1Z"/></svg>
+          </span>
+          <span><strong>ChainGuard</strong><small>Ethereum security</small></span>
+        </a>
+
+        <nav class="side-nav" aria-label="Navegação principal">
+          <p class="nav-label">Visão geral</p>
+          <a href="#dashboard" data-route="dashboard"><span data-icon="grid"></span>Dashboard</a>
+          <a href="#monitoramento" data-route="monitoramento"><span data-icon="wallet"></span>Carteiras<span class="nav-count" id="wallet-count">0</span></a>
+          <a href="#analisar" data-route="analisar"><span data-icon="scan"></span>Analisar risco</a>
+
+          <p class="nav-label">Proteção</p>
+          <a href="#alertas" data-route="alertas"><span data-icon="bell"></span>Alertas<span class="nav-dot" id="alert-dot"></span></a>
+          <a href="#whitelist" data-route="whitelist"><span data-icon="shield"></span>Whitelist</a>
+          <a href="#historico" data-route="historico"><span data-icon="history"></span>Histórico</a>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="network-pill"><span class="network-dot"></span>Ethereum Mainnet</div>
+          <a href="#configuracoes" class="settings-link" data-route="configuracoes"><span data-icon="settings"></span>Configurações</a>
+          <div class="profile">
+            <span class="avatar">PL</span>
+            <span><strong>Projeto TCC</strong><small>Ambiente demonstrativo</small></span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="icon-button mobile-menu" id="mobile-menu" aria-label="Abrir menu"><span data-icon="menu"></span></button>
+          <div class="breadcrumb"><span>ChainGuard</span><b>/</b><strong id="page-crumb">Dashboard</strong></div>
+          <div class="top-actions">
+            <div class="sync-state"><span></span><div><b>Monitoramento ativo</b><small id="sync-time">Atualizado agora</small></div></div>
+            <button class="icon-button" id="theme-button" aria-label="Alternar contraste"><span data-icon="sun"></span></button>
+            <button class="icon-button alert-shortcut" data-go="alertas" aria-label="Ver alertas"><span data-icon="bell"></span><i id="top-alert-count">0</i></button>
+          </div>
+        </header>
+
+        <div class="content" id="app" aria-live="polite"></div>
+      </main>
+    </div>
+
+    <div class="mobile-overlay" id="mobile-overlay"></div>
+    <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+
+    <dialog id="wallet-dialog" class="modal">
+      <form method="dialog" id="wallet-form">
+        <div class="modal-head">
+          <div class="modal-icon"><span data-icon="wallet"></span></div>
+          <div><span class="eyebrow">Novo monitoramento</span><h2>Adicionar carteira</h2></div>
+          <button class="icon-button" value="cancel" aria-label="Fechar"><span data-icon="x"></span></button>
+        </div>
+        <p class="modal-copy">Informe um endereço público da rede Ethereum. O ChainGuard nunca solicitará sua chave privada ou frase-semente.</p>
+        <label>Identificação <input name="label" required maxlength="32" placeholder="Ex.: Carteira principal" /></label>
+        <label>Endereço Ethereum <input name="address" required spellcheck="false" autocomplete="off" placeholder="0x…" /></label>
+        <p class="field-error" id="wallet-error"></p>
+        <div class="modal-actions"><button class="btn ghost" value="cancel">Cancelar</button><button class="btn primary" value="default" type="submit"><span data-icon="plus"></span>Começar monitoramento</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="whitelist-dialog" class="modal">
+      <form method="dialog" id="whitelist-form">
+        <div class="modal-head">
+          <div class="modal-icon success"><span data-icon="shield"></span></div>
+          <div><span class="eyebrow">Endereço confiável</span><h2>Adicionar à whitelist</h2></div>
+          <button class="icon-button" value="cancel" aria-label="Fechar"><span data-icon="x"></span></button>
+        </div>
+        <p class="modal-copy">Endereços confiáveis continuam sendo analisados, mas sua presença na whitelist reduz o risco contextual.</p>
+        <label>Nome <input name="label" required maxlength="32" placeholder="Ex.: Tesouraria do cliente" /></label>
+        <label>Endereço Ethereum <input name="address" required spellcheck="false" autocomplete="off" placeholder="0x…" /></label>
+        <p class="field-error" id="whitelist-error"></p>
+        <div class="modal-actions"><button class="btn ghost" value="cancel">Cancelar</button><button class="btn primary success" value="default" type="submit"><span data-icon="plus"></span>Adicionar endereço</button></div>
+      </form>
+    </dialog>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
