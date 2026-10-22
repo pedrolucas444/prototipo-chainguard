@@ -1,4 +1,10 @@
-const STORAGE_KEY = "chainguard-tcc-v1";
+const STORAGE_KEY = "chainguard-tcc-v2";
+const LEGACY_STORAGE_KEY = "chainguard-tcc-v1";
+const ETH_RPC_URL = "https://ethereum-rpc.publicnode.com";
+const BLOCKSCOUT_URL = "https://eth.blockscout.com";
+const ONCHAIN_REFRESH_MS = 60_000;
+const ACTIVITY_REFRESH_MS = 120_000;
+const RISK_REFRESH_MS = 300_000;
 
 const icons = {
   grid: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>',
@@ -25,14 +31,15 @@ const icons = {
   link: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>',
   filter: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 5h16l-6 7v6l-4 2v-8L4 5Z"/></svg>',
   external: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.5-2.6L20 9M4 15l2.4 2.6A7 7 0 0 0 17.9 15"/></svg>',
 };
 
 const seedState = {
   theme: "dark",
   wallets: [
-    { id: "w1", label: "Carteira principal", address: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", balance: 2.483, score: 14, status: "low", last: "há 2 min" },
-    { id: "w2", label: "Operações", address: "0x53d284357ec70cE289D6D64134DfAc8E511c8a3D", balance: 0.817, score: 39, status: "medium", last: "há 18 min" },
-    { id: "w3", label: "Tesouraria do TCC", address: "0x281055afc982d96fAaaBdc3a82aC21Afb9C1721a", balance: 5.102, score: 8, status: "low", last: "há 1 h" },
+    { id: "w1", label: "Carteira principal", address: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", balance: null, balanceSource: "pending", score: 14, status: "low", last: "aguardando" },
+    { id: "w2", label: "Operações", address: "0x53d284357ec70cE289D6D64134DfAc8E511c8a3D", balance: null, balanceSource: "pending", score: 39, status: "medium", last: "aguardando" },
+    { id: "w3", label: "Tesouraria do TCC", address: "0x281055afc982d96fAaaBdc3a82aC21Afb9C1721a", balance: null, balanceSource: "pending", score: 8, status: "low", last: "aguardando" },
   ],
   whitelist: [
     { id: "t1", label: "Tesouraria do cliente", address: "0x281055afc982d96fAaaBdc3a82aC21Afb9C1721a", created: "18 out 2026" },
@@ -52,6 +59,11 @@ const seedState = {
   price: null,
   priceChange: null,
   priceUpdated: null,
+  onchainHistory: [],
+  onchainStatus: "pending",
+  seenTransactions: [],
+  monitoringInitialized: false,
+  lastActivitySync: null,
 };
 
 let state = loadState();
@@ -60,12 +72,16 @@ let filters = { query: "", risk: "all", history: "all" };
 
 function loadState() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return saved ? { ...structuredClone(seedState), ...saved, price: null, priceUpdated: null } : structuredClone(seedState);
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+    const saved = raw ? JSON.parse(raw) : null;
+    const loaded = saved ? { ...structuredClone(seedState), ...saved, price: null, priceUpdated: null, onchainHistory: [], onchainStatus: "pending" } : structuredClone(seedState);
+    loaded.seenTransactions = Array.isArray(loaded.seenTransactions) ? loaded.seenTransactions : [];
+    loaded.wallets = loaded.wallets.map(wallet => ({ ...wallet, balance: null, balanceSource: "pending", last: "aguardando" }));
+    return loaded;
   } catch { return structuredClone(seedState); }
 }
 function saveState() {
-  const { price, priceUpdated, ...persistent } = state;
+  const { price, priceUpdated, onchainHistory, onchainStatus, ...persistent } = state;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persistent));
   updateBadges();
 }
@@ -76,6 +92,10 @@ function shortAddress(value) { return `${value.slice(0, 7)}…${value.slice(-5)}
 function getRoute() { const value = location.hash.replace("#", ""); return ["dashboard","monitoramento","analisar","alertas","whitelist","historico","configuracoes"].includes(value) ? value : "dashboard"; }
 function riskMeta(score) { return score >= 65 ? { key: "high", label: "Alto risco", tone: "var(--red)", text: "Recomendamos não prosseguir sem uma verificação adicional." } : score >= 30 ? { key: "medium", label: "Atenção", tone: "var(--amber)", text: "Há sinais que merecem revisão antes de prosseguir." } : { key: "low", label: "Baixo risco", tone: "var(--green)", text: "Nenhum indício crítico foi encontrado nesta análise." }; }
 function formatBRL(value) { return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 2 }).format(value); }
+function formatEth(value) { return new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 6 }).format(value); }
+function weiHexToEth(hex) { return Number(BigInt(hex)) / 1e18; }
+function weiDecimalToEth(value) { return Number(BigInt(value || "0")) / 1e18; }
+function formatOnchainDate(timestamp) { return new Date(Number(timestamp) * 1000).toLocaleString("pt-BR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }); }
 function icon(name) { return `<span data-icon="${name}">${icons[name] || ""}</span>`; }
 function hydrateIcons(root = document) { root.querySelectorAll("[data-icon]").forEach(node => { const name = node.dataset.icon; if (!node.innerHTML.trim() && icons[name]) node.innerHTML = icons[name]; }); }
 
@@ -90,9 +110,9 @@ function emptyState(iconName, title, copy, action = "") { return `<div class="em
 function renderDashboard() {
   const avg = Math.round(state.wallets.reduce((n, w) => n + w.score, 0) / Math.max(state.wallets.length, 1));
   const unread = state.alerts.filter(a => a.unread).length;
-  const recent = state.history.slice(0, 4);
+  const recent = [...state.onchainHistory, ...state.history].slice(0, 4);
   return `${pageHeading("Visão geral", "Olá, equipe ChainGuard.", "Acompanhe os sinais de segurança das suas carteiras públicas Ethereum em um só lugar.", `<button class="btn ghost" data-go="analisar">${icon("scan")} Analisar transação</button><button class="btn primary" data-open="wallet">${icon("plus")} Adicionar carteira</button>`)}
-    <div class="scope-banner">${icon("info")}<div><strong>Protótipo acadêmico em modo demonstrativo.</strong> Os scores atuais usam regras locais explicáveis. A arquitetura já separa a interface das futuras fontes on-chain, webhooks e motor analítico.</div></div>
+    <div class="scope-banner">${icon("info")}<div><strong>Dados Ethereum ativos.</strong> Saldos e movimentações são consultados on-chain. O motor explicável usa fontes públicas e sinaliza claramente quando precisa recorrer à contingência local.</div></div>
     <section class="grid cols-4" aria-label="Indicadores">
       ${metricCard("wallet", "Carteiras monitoradas", state.wallets.length, `<span class="good">●</span> todas verificadas`, "var(--purple)")}
       ${metricCard("activity", "Risco médio", `${avg}/100`, avg < 30 ? `<span class="good">−6%</span> nesta semana` : `<span class="bad">requer atenção</span>`, riskMeta(avg).tone)}
@@ -122,21 +142,26 @@ function priceMetric() {
 
 function walletTable(wallets) {
   if (!wallets.length) return emptyState("wallet", "Nenhuma carteira encontrada", "Adicione um endereço público Ethereum para iniciar o monitoramento.", `<button class="btn primary" data-open="wallet">${icon("plus")} Adicionar carteira</button>`);
-  return `<div class="table-wrap"><table><thead><tr><th>Carteira</th><th>Saldo</th><th>Risco</th><th>Última verificação</th><th></th></tr></thead><tbody>${wallets.map(w => `<tr><td><div class="identity"><span class="identity-icon">${icon("ethereum")}</span><span><strong>${e(w.label)}</strong><small>${shortAddress(w.address)}</small></span></div></td><td><strong>${Number(w.balance).toFixed(3)} ETH</strong></td><td><div class="score-cell">${statusBadge(w.score)}<span class="score-bar"><i style="width:${w.score}%;--tone:${riskMeta(w.score).tone}"></i></span><b>${w.score}</b></div></td><td>${e(w.last)}</td><td><div class="row-actions"><button class="mini-button" data-copy="${e(w.address)}" aria-label="Copiar endereço">${icon("copy")}</button><button class="mini-button" data-analyze-address="${e(w.address)}" aria-label="Analisar carteira">${icon("scan")}</button><button class="mini-button danger" data-delete-wallet="${w.id}" aria-label="Remover carteira">${icon("trash")}</button></div></td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Carteira</th><th>Saldo</th><th>Risco</th><th>Última verificação</th><th></th></tr></thead><tbody>${wallets.map(w => `<tr><td><div class="identity"><span class="identity-icon">${icon("ethereum")}</span><span><strong>${e(w.profileName || w.label)}</strong><small>${e(w.profileName ? `${w.label} · ` : "")}${shortAddress(w.address)}</small></span></div></td><td>${balanceCell(w)}</td><td><div class="score-cell">${statusBadge(w.score)}<span class="score-bar"><i style="width:${w.score}%;--tone:${riskMeta(w.score).tone}"></i></span><b>${w.score}</b>${w.scoreSource === "onchain" ? '<em class="live-tag">REAL</em>' : ""}</div></td><td>${e(w.last)}</td><td><div class="row-actions"><button class="mini-button" data-copy="${e(w.address)}" aria-label="Copiar endereço">${icon("copy")}</button><a class="mini-button" href="https://etherscan.io/address/${e(w.address)}" target="_blank" rel="noreferrer" aria-label="Abrir no Etherscan">${icon("external")}</a><button class="mini-button" data-analyze-address="${e(w.address)}" aria-label="Analisar carteira">${icon("scan")}</button><button class="mini-button danger" data-delete-wallet="${w.id}" aria-label="Remover carteira">${icon("trash")}</button></div></td></tr>`).join("")}</tbody></table></div>`;
+}
+function balanceCell(wallet) {
+  if (wallet.balanceSource === "loading" || wallet.balanceSource === "pending") return `<div class="balance-cell"><strong class="skeleton">0,000 ETH</strong><small>consultando rede…</small></div>`;
+  if (wallet.balanceSource === "error") return `<div class="balance-cell"><strong>Indisponível</strong><small class="bad">falha na consulta</small></div>`;
+  return `<div class="balance-cell"><strong>${formatEth(wallet.balance)} ETH</strong><small><span class="network-dot"></span> saldo on-chain</small></div>`;
 }
 function historyTable(items, actions = true) {
   if (!items.length) return emptyState("history", "Nenhum registro", "As análises e movimentações aparecerão aqui.");
-  return `<div class="table-wrap"><table><thead><tr><th>Evento</th><th>Identificador</th><th>Valor</th><th>Score</th><th>Data</th>${actions ? "<th></th>" : ""}</tr></thead><tbody>${items.map(h => `<tr><td><div class="identity"><span class="identity-icon">${icon(h.type === "Recebimento" ? "arrowIn" : h.type === "Envio" ? "arrowOut" : "scan")}</span><span><strong>${e(h.type)}</strong><small>${e(h.wallet)}</small></span></div></td><td class="mono">${shortAddress(h.hash)}</td><td><strong>${e(h.amount)}</strong></td><td>${statusBadge(h.score)} <b style="margin-left:5px">${h.score}</b></td><td>${e(h.date)}</td>${actions ? `<td><button class="mini-button" data-copy="${e(h.hash)}" aria-label="Copiar hash">${icon("copy")}</button></td>` : ""}</tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Evento</th><th>Identificador</th><th>Valor</th><th>Score</th><th>Data</th>${actions ? "<th></th>" : ""}</tr></thead><tbody>${items.map(h => `<tr><td><div class="identity"><span class="identity-icon">${icon(h.type === "Recebimento" ? "arrowIn" : h.type === "Envio" ? "arrowOut" : "scan")}</span><span><strong>${e(h.type)} ${h.source === "onchain" ? '<em class="live-tag">ON-CHAIN</em>' : ""}</strong><small>${e(h.wallet)}</small></span></div></td><td class="mono">${shortAddress(h.hash)}</td><td><strong>${e(h.amount)}</strong></td><td>${statusBadge(h.score)} <b style="margin-left:5px">${h.score}</b></td><td>${e(h.date)}</td>${actions ? `<td><div class="row-actions"><button class="mini-button" data-copy="${e(h.hash)}" aria-label="Copiar hash">${icon("copy")}</button><a class="mini-button" href="https://etherscan.io/tx/${e(h.hash)}" target="_blank" rel="noreferrer" aria-label="Abrir transação no Etherscan">${icon("external")}</a></div></td>` : ""}</tr>`).join("")}</tbody></table></div>`;
 }
 
 function renderMonitoring() {
   const filtered = state.wallets.filter(w => (w.label + w.address).toLowerCase().includes(filters.query.toLowerCase()) && (filters.risk === "all" || w.status === filters.risk));
-  return `${pageHeading("Monitoramento on-chain", "Carteiras Ethereum", "Cadastre endereços públicos para centralizar sinais de atividade e risco. Nenhuma chave privada é necessária.", `<button class="btn primary" data-open="wallet">${icon("plus")} Adicionar carteira</button>`)}
+  return `${pageHeading("Monitoramento on-chain", "Carteiras Ethereum", "Cadastre endereços públicos para centralizar sinais de atividade e risco. Nenhuma chave privada é necessária.", `<button class="btn ghost" data-sync-onchain>${icon("refresh")} Atualizar dados</button><button class="btn primary" data-open="wallet">${icon("plus")} Adicionar carteira</button>`)}
     <div class="card"><div class="toolbar"><div class="search">${icon("search")}<input id="wallet-search" value="${e(filters.query)}" placeholder="Buscar nome ou endereço…" /></div><select id="risk-filter"><option value="all">Todos os riscos</option><option value="low" ${filters.risk === "low" ? "selected" : ""}>Baixo risco</option><option value="medium" ${filters.risk === "medium" ? "selected" : ""}>Atenção</option><option value="high" ${filters.risk === "high" ? "selected" : ""}>Alto risco</option></select></div>${walletTable(filtered)}</div>`;
 }
 
 function renderAnalyze() {
-  return `${pageHeading("Motor explicável", "Analisar risco", "Simule a avaliação de uma transação Ethereum e veja quais sinais contribuíram para o resultado.")}
+  return `${pageHeading("Motor explicável", "Analisar risco", "Avalie uma transação Ethereum com dados públicos e veja quais sinais contribuíram para o resultado.")}
     <div class="analyze-layout">
       <form class="card form-card" id="analysis-form">
         <h2>Dados da transação</h2><p>Use o hash de uma transação ou preencha os dados básicos para uma análise preventiva.</p>
@@ -157,7 +182,8 @@ function renderAnalyze() {
 function renderAlerts() {
   const unread = state.alerts.filter(a => a.unread).length;
   return `${pageHeading("Proteção contínua", "Central de alertas", "Priorize eventos detectados nas carteiras monitoradas e registre a revisão da equipe.", unread ? `<button class="btn ghost" data-mark-all>${icon("check")} Marcar todos como revisados</button>` : "")}
-    <div class="card"><div class="card-header"><div><h2>${unread ? `${unread} alertas pendentes` : "Nenhum alerta pendente"}</h2><p>Ordenados por criticidade e horário de detecção</p></div></div><div class="alert-list">${state.alerts.length ? state.alerts.map(a => `<article class="alert-item ${a.unread ? "unread" : ""}"><span class="alert-symbol">${icon(a.severity === "low" ? "check" : "warning")}</span><div class="alert-content"><div>${statusBadge(a.severity === "high" ? 78 : a.severity === "medium" ? 46 : 10)} <strong>${e(a.title)}</strong></div><p>${e(a.detail)}</p><div class="alert-meta"><span>${e(a.address)}</span>${a.unread ? `<button class="text-link" data-review-alert="${a.id}">Marcar como revisado</button>` : "<span>✓ revisado</span>"}</div></div><time>${e(a.time)}</time></article>`).join("") : emptyState("bell", "Nenhum alerta", "Os eventos de segurança detectados aparecerão aqui.")}</div></div>`;
+    <div class="scope-banner">${icon("activity")}<div><strong>Monitoramento automático desta sessão.</strong> A interface verifica novas movimentações a cada dois minutos enquanto estiver aberta. A etapa backend adicionará webhooks 24/7.</div></div>
+    <div class="card"><div class="card-header"><div><h2>${unread ? `${unread} alertas pendentes` : "Nenhum alerta pendente"}</h2><p>Ordenados por criticidade e horário de detecção</p></div></div><div class="alert-list">${state.alerts.length ? state.alerts.map(a => `<article class="alert-item ${a.unread ? "unread" : ""}"><span class="alert-symbol">${icon(a.severity === "low" ? "check" : "warning")}</span><div class="alert-content"><div>${statusBadge(a.severity === "high" ? 78 : a.severity === "medium" ? 46 : 10)} ${a.source === "onchain" ? '<em class="live-tag">ON-CHAIN</em>' : ""} <strong>${e(a.title)}</strong></div><p>${e(a.detail)}</p><div class="alert-meta"><span>${e(a.address)}</span>${a.txHash ? `<a class="text-link" href="https://etherscan.io/tx/${e(a.txHash)}" target="_blank" rel="noreferrer">Ver transação ↗</a>` : ""}${a.unread ? `<button class="text-link" data-review-alert="${a.id}">Marcar como revisado</button>` : "<span>✓ revisado</span>"}</div></div><time>${e(a.time)}</time></article>`).join("") : emptyState("bell", "Nenhum alerta", "Os eventos de segurança detectados aparecerão aqui.")}</div></div>`;
 }
 
 function renderWhitelist() {
@@ -167,17 +193,18 @@ function renderWhitelist() {
 }
 
 function renderHistory() {
-  const items = state.history.filter(h => filters.history === "all" || h.type === filters.history).filter(h => (h.wallet + h.hash).toLowerCase().includes(filters.query.toLowerCase()));
+  const combined = [...state.onchainHistory, ...state.history];
+  const items = combined.filter(h => filters.history === "all" || h.type === filters.history).filter(h => (h.wallet + h.hash).toLowerCase().includes(filters.query.toLowerCase()));
   return `${pageHeading("Rastreabilidade", "Histórico de análises", "Consulte os resultados produzidos pelo protótipo e os eventos associados às carteiras monitoradas.")}
-    <div class="card"><div class="toolbar"><div class="search">${icon("search")}<input id="history-search" value="${e(filters.query)}" placeholder="Buscar carteira ou hash…" /></div><select id="history-filter"><option value="all">Todos os eventos</option><option ${filters.history === "Recebimento" ? "selected" : ""}>Recebimento</option><option ${filters.history === "Envio" ? "selected" : ""}>Envio</option><option ${filters.history === "Análise manual" ? "selected" : ""}>Análise manual</option></select></div>${historyTable(items)}</div>`;
+    <div class="card"><div class="toolbar"><div class="search">${icon("search")}<input id="history-search" value="${e(filters.query)}" placeholder="Buscar carteira ou hash…" /></div><span class="api-state">${state.onchainStatus === "loading" ? "SINCRONIZANDO" : "BLOCKSCOUT"}</span><select id="history-filter"><option value="all">Todos os eventos</option><option ${filters.history === "Recebimento" ? "selected" : ""}>Recebimento</option><option ${filters.history === "Envio" ? "selected" : ""}>Envio</option><option ${filters.history === "Análise manual" ? "selected" : ""}>Análise manual</option></select></div>${historyTable(items)}</div>`;
 }
 
 function renderSettings() {
   return `${pageHeading("Evolução técnica", "Integrações e configurações", "Acompanhe o que já está conectado e as próximas etapas do desenvolvimento do ChainGuard.")}
     <div class="card pad"><div class="integration-grid">
       ${integration("ethereum", "Cotação Ethereum", "CoinGecko", "Cotação atual de ETH em BRL e variação de 24 horas. O comparador por corretora será construído em uma etapa separada.", "live", "Conectado", "var(--blue)")}
-      ${integration("activity", "Motor de risk score", "Regras explicáveis", "Versão demonstrativa determinística, com fatores visíveis e histórico local de resultados.", "live", "Protótipo ativo", "var(--green)")}
-      ${integration("link", "Dados on-chain", "Provedor RPC + webhooks", "Vai substituir os eventos de demonstração por transações reais e monitoramento contínuo do backend.", "future", "Próxima etapa", "var(--purple)")}
+      ${integration("activity", "Motor de risk score", "Regras explicáveis", "Combina reputação pública, histórico on-chain, tipo de endereço, whitelist e exposição financeira.", "live", "Dados on-chain", "var(--green)")}
+      ${integration("link", "Monitoramento on-chain", "PublicNode + Blockscout", "Saldos, atividade e alertas são atualizados enquanto o app está aberto. Webhooks 24/7 entram com o backend.", "live", "Sessão ativa", "var(--purple)")}
       ${integration("wallet", "MetaMask", "Assinatura não custodial", "Será integrada depois para analisar a intenção antes da confirmação do envio pelo usuário.", "future", "Planejado", "var(--amber)")}
       ${integration("ethereum", "Comparador de corretoras", "Somente ETH", "Vai comparar preço, taxas e valor líquido recebido. O botão de melhor compra permanece desativado nesta versão.", "future", "Planejado", "var(--accent)")}
       ${integration("shield", "Persistência e autenticação", "API + banco de dados", "Vai guardar monitoramentos, regras, alertas e auditoria por usuário, fora do navegador.", "future", "Próxima etapa", "var(--red)")}
@@ -209,29 +236,70 @@ function toast(message, type = "success") {
   const node = document.createElement("div"); node.className = `toast ${type}`; node.innerHTML = `${icon(type === "error" ? "warning" : "check")}<span>${e(message)}</span>`; document.getElementById("toast-region").append(node); hydrateIcons(node); setTimeout(() => node.remove(), 3500);
 }
 
-function deterministicRisk({ hash = "", from = "", to = "", amount = 0 }) {
-  const trusted = state.whitelist.some(i => i.address.toLowerCase() === to.toLowerCase());
-  const source = `${hash}${from}${to}`.toLowerCase();
-  const entropy = [...source].reduce((n, c, i) => (n + c.charCodeAt(0) * (i + 3)) % 997, 0);
-  const amountRisk = Number(amount) >= 5 ? 24 : Number(amount) >= 1 ? 14 : Number(amount) >= .25 ? 7 : 2;
-  const noveltyRisk = entropy % 25;
-  const contractRisk = source.includes("dead") || source.includes("bad") ? 28 : entropy % 3 === 0 ? 16 : 4;
-  const frequencyRisk = entropy % 5 === 0 ? 13 : 3;
-  const trustReduction = trusted ? 32 : 0;
-  const score = Math.max(3, Math.min(96, 12 + amountRisk + noveltyRisk + contractRisk + frequencyRisk - trustReduction));
-  return { score, factors: [
-    { icon: "activity", title: "Histórico do endereço", detail: trusted ? "Destino reconhecido na whitelist." : "Endereço sem confiança explícita cadastrada.", value: trusted ? "−32" : `+${noveltyRisk}`, tone: trusted ? "var(--green)" : "var(--amber)" },
-    { icon: "ethereum", title: "Valor movimentado", detail: `${Number(amount).toLocaleString("pt-BR")} ETH considerado na exposição financeira.`, value: `+${amountRisk}`, tone: amountRisk > 15 ? "var(--red)" : "var(--purple)" },
-    { icon: "link", title: "Interação contratual", detail: contractRisk > 10 ? "Padrão compatível com contrato de pouco histórico." : "Nenhum padrão contratual crítico identificado.", value: `+${contractRisk}`, tone: contractRisk > 10 ? "var(--red)" : "var(--green)" },
-    { icon: "history", title: "Frequência simulada", detail: frequencyRisk > 5 ? "Sequência atípica detectada na janela analisada." : "Frequência dentro do comportamento esperado.", value: `+${frequencyRisk}`, tone: frequencyRisk > 5 ? "var(--amber)" : "var(--green)" },
+async function fetchBlockscoutJson(path) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await fetch(`${BLOCKSCOUT_URL}${path}`, { headers: { accept: "application/json" }, signal: controller.signal });
+    if (!response.ok) throw new Error(`Blockscout ${response.status}`);
+    return await response.json();
+  } finally { clearTimeout(timeout); }
+}
+
+async function fetchAddressProfile(address) {
+  const safeAddress = encodeURIComponent(address);
+  const [overview, counters] = await Promise.all([
+    fetchBlockscoutJson(`/api/v2/addresses/${safeAddress}`),
+    fetchBlockscoutJson(`/api/v2/addresses/${safeAddress}/tabs-counters`),
+  ]);
+  return {
+    address,
+    ens: typeof overview.ens_domain_name === "string" ? overview.ens_domain_name : null,
+    isContract: Boolean(overview.is_contract),
+    isVerified: Boolean(overview.is_verified),
+    isScam: Boolean(overview.is_scam),
+    reputation: typeof overview.reputation === "string" ? overview.reputation : "unknown",
+    proxyType: typeof overview.proxy_type === "string" ? overview.proxy_type : null,
+    txCount: Number(counters.transactions_count || 0),
+    tokenTransfers: Number(counters.token_transfers_count || 0),
+  };
+}
+
+function calculateRisk({ to, amount = 0 }, profile) {
+  const trusted = state.whitelist.some(item => item.address.toLowerCase() === to.toLowerCase());
+  const amountRisk = Number(amount) >= 5 ? 18 : Number(amount) >= 1 ? 12 : Number(amount) >= .25 ? 6 : 2;
+  const historyRisk = profile.txCount === 0 ? 26 : profile.txCount < 5 ? 16 : profile.txCount < 25 ? 7 : 0;
+  const reputationRisk = profile.isScam ? 75 : profile.reputation !== "ok" ? 30 : 0;
+  const contractRisk = profile.isContract ? (profile.isVerified ? 2 : 18) : 0;
+  const trustReduction = trusted ? 28 : 0;
+  const score = Math.max(3, Math.min(98, 10 + amountRisk + historyRisk + reputationRisk + contractRisk - trustReduction));
+  return { score, source: "onchain", profile, factors: [
+    { icon: "shield", title: "Reputação pública", detail: profile.isScam ? "O endereço possui sinalização pública de fraude." : profile.reputation === "ok" ? "Nenhuma sinalização negativa encontrada na Blockscout." : "Reputação ainda não classificada pela fonte pública.", value: reputationRisk ? `+${reputationRisk}` : "+0", tone: reputationRisk >= 30 ? "var(--red)" : "var(--green)" },
+    { icon: "history", title: "Histórico on-chain", detail: `${profile.txCount.toLocaleString("pt-BR")} transações e ${profile.tokenTransfers.toLocaleString("pt-BR")} transferências de tokens identificadas.`, value: historyRisk ? `+${historyRisk}` : "+0", tone: historyRisk >= 16 ? "var(--amber)" : "var(--green)" },
+    { icon: "link", title: "Tipo do endereço", detail: profile.isContract ? `${profile.isVerified ? "Contrato verificado" : "Contrato não verificado"}${profile.proxyType ? ` (${profile.proxyType})` : ""}.` : "Conta Ethereum externa, sem bytecode de contrato.", value: contractRisk ? `+${contractRisk}` : "+0", tone: contractRisk >= 18 ? "var(--red)" : "var(--green)" },
+    { icon: "activity", title: "Whitelist", detail: trusted ? "Destino reconhecido pela equipe como confiável." : "Destino não consta na whitelist local.", value: trusted ? `−${trustReduction}` : "+0", tone: trusted ? "var(--green)" : "var(--amber)" },
+    { icon: "ethereum", title: "Exposição financeira", detail: `${Number(amount).toLocaleString("pt-BR")} ETH considerado no impacto potencial.`, value: `+${amountRisk}`, tone: amountRisk >= 12 ? "var(--red)" : "var(--purple)" },
   ]};
+}
+
+function fallbackRisk({ hash = "", from = "", to = "", amount = 0 }) {
+  const entropy = [...`${hash}${from}${to}`].reduce((sum, char, index) => (sum + char.charCodeAt(0) * (index + 3)) % 997, 0);
+  const score = 18 + entropy % 28;
+  return { score, source: "fallback", factors: [
+    { icon: "warning", title: "Fonte on-chain indisponível", detail: "A análise usou uma regra local temporária. Atualize novamente antes de tomar uma decisão.", value: `+${score}`, tone: "var(--amber)" },
+  ]};
+}
+
+async function analyzeTransactionRisk(data) {
+  try { return calculateRisk(data, await fetchAddressProfile(data.to)); }
+  catch { return fallbackRisk(data); }
 }
 
 function showAnalysisResult(data, result) {
   const meta = riskMeta(result.score);
   const output = document.getElementById("analysis-output");
   output.className = "card analysis-result";
-  output.innerHTML = `<div class="result-score"><div class="gauge" style="--score:${result.score};--tone:${meta.tone}"><div><strong>${result.score}</strong><small>de 100</small></div></div><div><span class="status ${meta.key}">${meta.label}</span><h2>${meta.key === "high" ? "Transação sensível" : meta.key === "medium" ? "Revisão recomendada" : "Sinais controlados"}</h2><p>${meta.text}</p></div></div><div class="factor-list">${result.factors.map(f => `<div class="factor"><span style="color:${f.tone};background:color-mix(in srgb, ${f.tone} 10%, transparent)">${icon(f.icon)}</span><div><strong>${f.title}</strong><small>${f.detail}</small></div><b style="color:${f.tone}">${f.value}</b></div>`).join("")}</div><div class="disclaimer">${icon("info")}<span>Este score é uma estimativa de apoio à decisão, não uma garantia contra fraude. Nesta versão, os fatores usam regras demonstrativas determinísticas.</span></div>`;
+  output.innerHTML = `<div class="result-score"><div class="gauge" style="--score:${result.score};--tone:${meta.tone}"><div><strong>${result.score}</strong><small>de 100</small></div></div><div><span class="status ${meta.key}">${meta.label}</span><h2>${meta.key === "high" ? "Transação sensível" : meta.key === "medium" ? "Revisão recomendada" : "Sinais controlados"}</h2><p>${meta.text}${result.profile?.ens ? ` Identidade detectada: ${e(result.profile.ens)}.` : ""}</p></div></div><div class="factor-list">${result.factors.map(f => `<div class="factor"><span style="color:${f.tone};background:color-mix(in srgb, ${f.tone} 10%, transparent)">${icon(f.icon)}</span><div><strong>${f.title}</strong><small>${f.detail}</small></div><b style="color:${f.tone}">${f.value}</b></div>`).join("")}</div><div class="disclaimer">${icon("info")}<span>Este score apoia a decisão, mas não garante ausência de fraude. Fonte: ${result.source === "onchain" ? "dados públicos Ethereum e Blockscout" : "regra local de contingência"}.</span></div>`;
   hydrateIcons(output);
 }
 
@@ -255,6 +323,157 @@ async function fetchEthPrice() {
   }
 }
 
+async function rpcCall(method, params) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(ETH_RPC_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method, params }),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`RPC ${response.status}`);
+    const data = await response.json();
+    if (data.error || !data.result) throw new Error(data.error?.message || "Resposta RPC inválida");
+    return data.result;
+  } finally { clearTimeout(timeout); }
+}
+
+async function syncWalletBalances({ announce = false } = {}) {
+  if (!state.wallets.length) return;
+  state.wallets.forEach(wallet => { wallet.balanceSource = "loading"; });
+  render();
+  const targets = state.wallets.map(wallet => ({ id: wallet.id, address: wallet.address }));
+  const results = await Promise.allSettled(targets.map(async wallet => {
+    const balanceHex = await rpcCall("eth_getBalance", [wallet.address, "latest"]);
+    return { id: wallet.id, balance: weiHexToEth(balanceHex) };
+  }));
+  results.forEach((result, index) => {
+    const wallet = state.wallets.find(item => item.id === targets[index]?.id);
+    if (!wallet) return;
+    if (result.status === "fulfilled") {
+      wallet.balance = result.value.balance;
+      wallet.balanceSource = "onchain";
+      wallet.last = "agora";
+    } else {
+      wallet.balanceSource = "error";
+      wallet.last = "falha na consulta";
+    }
+  });
+  saveState(); render();
+  document.getElementById("sync-time").textContent = `Atualizado às ${new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
+  if (announce) toast(results.some(r => r.status === "rejected") ? "Alguns saldos não puderam ser atualizados." : "Saldos atualizados pela Ethereum.", results.some(r => r.status === "rejected") ? "error" : "success");
+}
+
+async function fetchRecentTransactions(wallet) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const url = `${BLOCKSCOUT_URL}/api?module=account&action=txlist&address=${encodeURIComponent(wallet.address)}&page=1&offset=25&sort=desc`;
+    const response = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
+    if (!response.ok) throw new Error(`Blockscout ${response.status}`);
+    const data = await response.json();
+    if (data.status !== "1" || !Array.isArray(data.result)) return [];
+    return data.result
+      .filter(tx => tx.hash && BigInt(tx.value || "0") > 0n)
+      .slice(0, 5)
+      .map(tx => {
+        const outgoing = tx.from?.toLowerCase() === wallet.address.toLowerCase();
+        const counterparty = outgoing ? tx.to : tx.from;
+        const trusted = state.whitelist.some(item => item.address.toLowerCase() === counterparty?.toLowerCase());
+        const failed = tx.isError === "1" || tx.txreceipt_status === "0";
+        const score = failed ? 72 : trusted ? 8 : 24;
+        return {
+          id: `chain-${wallet.id}-${tx.hash}`,
+          type: outgoing ? "Envio" : "Recebimento",
+          hash: tx.hash,
+          wallet: wallet.label,
+          counterparty,
+          amount: `${outgoing ? "−" : "+"}${formatEth(weiDecimalToEth(tx.value))} ETH`,
+          score,
+          date: formatOnchainDate(tx.timeStamp),
+          timestamp: Number(tx.timeStamp),
+          failed,
+          source: "onchain",
+        };
+      });
+  } finally { clearTimeout(timeout); }
+}
+
+function processNewTransactions(items) {
+  const currentIds = items.map(item => item.id);
+  if (!state.monitoringInitialized) {
+    state.seenTransactions = currentIds.slice(0, 500);
+    state.monitoringInitialized = true;
+    state.lastActivitySync = new Date().toISOString();
+    return 0;
+  }
+  const seen = new Set(state.seenTransactions);
+  const fresh = items.filter(item => !seen.has(item.id));
+  fresh.forEach(item => {
+    const severity = item.score >= 65 ? "high" : item.score >= 30 ? "medium" : "low";
+    state.alerts.unshift({
+      id: `alert-${item.id}`,
+      unread: true,
+      title: `Novo ${item.type.toLowerCase()} detectado`,
+      detail: `${item.wallet}: movimentação de ${item.amount.replace(/[+−]/g, "")} confirmada na Ethereum.`,
+      address: item.counterparty ? shortAddress(item.counterparty) : "endereço indisponível",
+      time: "agora",
+      severity,
+      source: "onchain",
+      txHash: item.hash,
+    });
+  });
+  state.alerts = state.alerts.slice(0, 60);
+  state.seenTransactions = [...new Set([...currentIds, ...state.seenTransactions])].slice(0, 500);
+  state.lastActivitySync = new Date().toISOString();
+  return fresh.length;
+}
+
+async function syncWalletActivity({ announce = false } = {}) {
+  if (!state.wallets.length) { state.onchainHistory = []; return; }
+  state.onchainStatus = "loading";
+  if (route === "historico") render();
+  const results = await Promise.allSettled(state.wallets.map(fetchRecentTransactions));
+  state.onchainHistory = results
+    .filter(result => result.status === "fulfilled")
+    .flatMap(result => result.value)
+    .filter((item, index, items) => items.findIndex(other => other.id === item.id) === index)
+    .sort((a, b) => b.timestamp - a.timestamp);
+  const newCount = processNewTransactions(state.onchainHistory);
+  state.onchainStatus = results.some(result => result.status === "rejected") ? "partial" : "ready";
+  saveState(); render();
+  if (newCount) toast(`${newCount} nova${newCount > 1 ? "s" : ""} movimentaç${newCount > 1 ? "ões" : "ão"} detectada${newCount > 1 ? "s" : ""}.`);
+  if (announce) toast(state.onchainStatus === "partial" ? "Atividade atualizada parcialmente." : "Movimentações on-chain atualizadas.", state.onchainStatus === "partial" ? "error" : "success");
+}
+
+async function syncWalletRisk() {
+  if (!state.wallets.length) return;
+  const results = await Promise.allSettled(state.wallets.map(async wallet => {
+    const profile = await fetchAddressProfile(wallet.address);
+    return { id: wallet.id, analysis: calculateRisk({ to: wallet.address, amount: 0 }, profile) };
+  }));
+  results.forEach(result => {
+    if (result.status !== "fulfilled") return;
+    const wallet = state.wallets.find(item => item.id === result.value.id);
+    if (!wallet) return;
+    wallet.score = result.value.analysis.score;
+    wallet.status = riskMeta(wallet.score).key;
+    wallet.scoreSource = "onchain";
+    wallet.riskFactors = result.value.analysis.factors;
+    wallet.profileName = result.value.analysis.profile.ens;
+    wallet.txCount = result.value.analysis.profile.txCount;
+    wallet.isContract = result.value.analysis.profile.isContract;
+  });
+  saveState(); render();
+}
+
+async function syncAllOnchain({ announce = false } = {}) {
+  await Promise.all([syncWalletBalances(), syncWalletActivity(), syncWalletRisk()]);
+  if (announce) toast("Saldos e movimentações on-chain atualizados.");
+}
+
 document.addEventListener("click", event => {
   const go = event.target.closest("[data-go]");
   if (go) { location.hash = go.dataset.go; closeMobileNav(); return; }
@@ -271,6 +490,7 @@ document.addEventListener("click", event => {
   const review = event.target.closest("[data-review-alert]");
   if (review) { const item = state.alerts.find(a => a.id === review.dataset.reviewAlert); if (item) item.unread = false; saveState(); render(); return; }
   if (event.target.closest("[data-mark-all]")) { state.alerts.forEach(a => a.unread = false); saveState(); render(); toast("Alertas marcados como revisados."); return; }
+  if (event.target.closest("[data-sync-onchain]")) { syncAllOnchain({ announce: true }); return; }
   if (event.target.closest("[data-reset]")) { state = structuredClone(seedState); saveState(); document.body.classList.remove("light"); render(); fetchEthPrice(); toast("Dados de demonstração restaurados."); }
 });
 
@@ -282,7 +502,7 @@ document.addEventListener("change", event => {
   if (event.target.id === "risk-filter") { filters.risk = event.target.value; render(); }
   if (event.target.id === "history-filter") { filters.history = event.target.value; render(); }
 });
-document.addEventListener("submit", event => {
+document.addEventListener("submit", async event => {
   if (event.target.id !== "analysis-form") return;
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
@@ -290,7 +510,10 @@ document.addEventListener("submit", event => {
   if (data.hash && !isTxHash(data.hash)) { error.textContent = "O hash informado não possui o formato de uma transação Ethereum."; return; }
   if (!isAddress(data.from) || !isAddress(data.to)) { error.textContent = "Informe endereços Ethereum válidos para origem e destino."; return; }
   if (Number(data.amount) <= 0) { error.textContent = "O valor deve ser maior que zero."; return; }
-  const result = deterministicRisk(data); showAnalysisResult(data, result);
+  const submitButton = event.target.querySelector('button[type="submit"]');
+  submitButton.disabled = true; submitButton.innerHTML = `${icon("refresh")} Consultando Ethereum…`; hydrateIcons(submitButton);
+  const result = await analyzeTransactionRisk(data); showAnalysisResult(data, result);
+  submitButton.disabled = false; submitButton.innerHTML = `${icon("scan")} Calcular risk score`; hydrateIcons(submitButton);
   const hash = data.hash || `0x${Array.from({length:64}, (_, i) => ((result.score * (i + 7) + i * 13) % 16).toString(16)).join("")}`;
   state.history.unshift({ id: crypto.randomUUID(), type: "Análise manual", hash, wallet: shortAddress(data.from), amount: `${Number(data.amount).toLocaleString("pt-BR")} ETH`, score: result.score, date: "Agora" });
   saveState(); toast("Análise concluída e registrada no histórico.");
@@ -300,9 +523,9 @@ document.getElementById("wallet-form").addEventListener("submit", event => {
   event.preventDefault(); const data = Object.fromEntries(new FormData(event.target)); const error = document.getElementById("wallet-error");
   if (!isAddress(data.address)) { error.textContent = "Informe um endereço Ethereum válido (0x + 40 caracteres hexadecimais)."; return; }
   if (state.wallets.some(w => w.address.toLowerCase() === data.address.toLowerCase())) { error.textContent = "Esta carteira já está sendo monitorada."; return; }
-  const score = 8 + [...data.address].reduce((n,c) => n + c.charCodeAt(0), 0) % 48;
-  state.wallets.unshift({ id: crypto.randomUUID(), label: data.label.trim(), address: data.address.trim(), balance: 0, score, status: riskMeta(score).key, last: "agora" });
-  saveState(); event.target.reset(); document.getElementById("wallet-dialog").close(); if (route !== "monitoramento") location.hash = "monitoramento"; else render(); toast("Carteira adicionada ao monitoramento.");
+  const score = 20;
+  state.wallets.unshift({ id: crypto.randomUUID(), label: data.label.trim(), address: data.address.trim(), balance: null, balanceSource: "pending", score, status: riskMeta(score).key, scoreSource: "pending", last: "aguardando" });
+  saveState(); event.target.reset(); document.getElementById("wallet-dialog").close(); if (route !== "monitoramento") location.hash = "monitoramento"; else render(); toast("Carteira adicionada. Consultando dados na Ethereum…"); syncAllOnchain();
 });
 document.getElementById("whitelist-form").addEventListener("submit", event => {
   event.preventDefault(); const data = Object.fromEntries(new FormData(event.target)); const error = document.getElementById("whitelist-error");
@@ -318,5 +541,8 @@ document.getElementById("mobile-overlay").addEventListener("click", closeMobileN
 document.getElementById("theme-button").addEventListener("click", () => { state.theme = state.theme === "light" ? "dark" : "light"; document.body.classList.toggle("light", state.theme === "light"); saveState(); });
 
 document.body.classList.toggle("light", state.theme === "light");
-hydrateIcons(); render(); fetchEthPrice();
+hydrateIcons(); render(); fetchEthPrice(); syncWalletBalances(); syncWalletActivity(); syncWalletRisk();
+setInterval(() => syncWalletBalances(), ONCHAIN_REFRESH_MS);
+setInterval(() => syncWalletActivity(), ACTIVITY_REFRESH_MS);
+setInterval(() => syncWalletRisk(), RISK_REFRESH_MS);
 setInterval(() => { document.getElementById("sync-time").textContent = "Atualizado há poucos segundos"; }, 30000);

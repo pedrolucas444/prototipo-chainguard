@@ -5,13 +5,23 @@ Protótipo navegável do TCC para monitoramento e análise de risco de carteiras
 ## Escopo desta versão
 
 - dashboard com cotação de ETH via CoinGecko;
-- cadastro local de carteiras públicas;
-- análise explicável de risco de uma transação;
+- cadastro de carteiras públicas com saldo real via Ethereum JSON-RPC;
+- histórico recente de movimentações via Blockscout;
+- análise explicável de risco baseada em reputação, histórico on-chain, tipo do endereço, whitelist e exposição financeira;
 - whitelist de endereços confiáveis;
-- alertas e histórico persistidos em `localStorage`;
+- monitoramento por polling e geração de alertas enquanto o app permanece aberto;
+- estado do protótipo persistido em `localStorage`;
 - interface responsiva com dados de demonstração.
 
-MetaMask, webhooks on-chain reais, backend persistente e comparação de preços entre corretoras estão sinalizados como próximas integrações e não são simulados como recursos prontos.
+MetaMask, webhooks 24/7, backend persistente e comparação de preços entre corretoras estão sinalizados como próximas integrações e não são simulados como recursos prontos.
+
+## Fontes externas
+
+- Ethereum PublicNode: saldo on-chain (`eth_getBalance`);
+- Blockscout: perfil público, reputação e movimentações recentes;
+- CoinGecko: cotação de ETH em BRL.
+
+Nenhuma dessas integrações exige chave secreta no navegador. O score é um mecanismo de apoio à decisão, não uma garantia contra fraude.
 
 ## Executar localmente
 
