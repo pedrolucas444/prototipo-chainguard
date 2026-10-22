@@ -68,7 +68,7 @@ const seedState = {
 
 let state = loadState();
 let route = getRoute();
-let filters = { query: "", risk: "all", history: "all" };
+let filters = { query: "", risk: "all", history: "all", historyWallet: "all" };
 
 function loadState() {
   try {
@@ -194,9 +194,20 @@ function renderWhitelist() {
 
 function renderHistory() {
   const combined = [...state.onchainHistory, ...state.history];
-  const items = combined.filter(h => filters.history === "all" || h.type === filters.history).filter(h => (h.wallet + h.hash).toLowerCase().includes(filters.query.toLowerCase()));
+  const selectedWallet = state.wallets.find(wallet => wallet.id === filters.historyWallet);
+  const items = combined
+    .filter(h => filters.history === "all" || h.type === filters.history)
+    .filter(h => {
+      if (!selectedWallet) return true;
+      if (h.walletId === selectedWallet.id) return true;
+      const historyWallet = String(h.wallet || "").toLowerCase();
+      return historyWallet === selectedWallet.label.toLowerCase()
+        || historyWallet === selectedWallet.address.toLowerCase()
+        || historyWallet === shortAddress(selectedWallet.address).toLowerCase();
+    });
+  const walletOptions = state.wallets.map(wallet => `<option value="${e(wallet.id)}" ${filters.historyWallet === wallet.id ? "selected" : ""}>${e(wallet.label)} · ${e(shortAddress(wallet.address))}</option>`).join("");
   return `${pageHeading("Rastreabilidade", "Histórico de análises", "Consulte os resultados produzidos pelo protótipo e os eventos associados às carteiras monitoradas.")}
-    <div class="card"><div class="toolbar"><div class="search">${icon("search")}<input id="history-search" value="${e(filters.query)}" placeholder="Buscar carteira ou hash…" /></div><span class="api-state">${state.onchainStatus === "loading" ? "SINCRONIZANDO" : "BLOCKSCOUT"}</span><select id="history-filter"><option value="all">Todos os eventos</option><option ${filters.history === "Recebimento" ? "selected" : ""}>Recebimento</option><option ${filters.history === "Envio" ? "selected" : ""}>Envio</option><option ${filters.history === "Análise manual" ? "selected" : ""}>Análise manual</option></select></div>${historyTable(items)}</div>`;
+    <div class="card"><div class="toolbar"><div class="search select-filter">${icon("wallet")}<select id="history-wallet-filter" aria-label="Filtrar histórico por carteira"><option value="all">Todas as carteiras</option>${walletOptions}</select></div><span class="api-state">${state.onchainStatus === "loading" ? "SINCRONIZANDO" : "BLOCKSCOUT"}</span><select id="history-filter" aria-label="Filtrar histórico por tipo de evento"><option value="all">Todos os eventos</option><option ${filters.history === "Recebimento" ? "selected" : ""}>Recebimento</option><option ${filters.history === "Envio" ? "selected" : ""}>Envio</option><option ${filters.history === "Análise manual" ? "selected" : ""}>Análise manual</option></select></div>${historyTable(items)}</div>`;
 }
 
 function renderSettings() {
@@ -389,6 +400,8 @@ async function fetchRecentTransactions(wallet) {
           type: outgoing ? "Envio" : "Recebimento",
           hash: tx.hash,
           wallet: wallet.label,
+          walletId: wallet.id,
+          walletAddress: wallet.address,
           counterparty,
           amount: `${outgoing ? "−" : "+"}${formatEth(weiDecimalToEth(tx.value))} ETH`,
           score,
@@ -496,11 +509,11 @@ document.addEventListener("click", event => {
 
 document.addEventListener("input", event => {
   if (event.target.id === "wallet-search") { filters.query = event.target.value; render(); document.getElementById("wallet-search")?.focus(); }
-  if (event.target.id === "history-search") { filters.query = event.target.value; render(); document.getElementById("history-search")?.focus(); }
 });
 document.addEventListener("change", event => {
   if (event.target.id === "risk-filter") { filters.risk = event.target.value; render(); }
   if (event.target.id === "history-filter") { filters.history = event.target.value; render(); }
+  if (event.target.id === "history-wallet-filter") { filters.historyWallet = event.target.value; render(); }
 });
 document.addEventListener("submit", async event => {
   if (event.target.id !== "analysis-form") return;
@@ -515,7 +528,8 @@ document.addEventListener("submit", async event => {
   const result = await analyzeTransactionRisk(data); showAnalysisResult(data, result);
   submitButton.disabled = false; submitButton.innerHTML = `${icon("scan")} Calcular risk score`; hydrateIcons(submitButton);
   const hash = data.hash || `0x${Array.from({length:64}, (_, i) => ((result.score * (i + 7) + i * 13) % 16).toString(16)).join("")}`;
-  state.history.unshift({ id: crypto.randomUUID(), type: "Análise manual", hash, wallet: shortAddress(data.from), amount: `${Number(data.amount).toLocaleString("pt-BR")} ETH`, score: result.score, date: "Agora" });
+  const monitoredWallet = state.wallets.find(wallet => wallet.address.toLowerCase() === data.from.toLowerCase());
+  state.history.unshift({ id: crypto.randomUUID(), type: "Análise manual", hash, wallet: monitoredWallet?.label || shortAddress(data.from), walletId: monitoredWallet?.id, walletAddress: data.from, amount: `${Number(data.amount).toLocaleString("pt-BR")} ETH`, score: result.score, date: "Agora" });
   saveState(); toast("Análise concluída e registrada no histórico.");
 });
 
