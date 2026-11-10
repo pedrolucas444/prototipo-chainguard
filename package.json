@@ -1,0 +1,16 @@
+{
+  "name": "chainguard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ChainGuard: monitoramento e análise de risco de carteiras Ethereum (não custodial).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test \"tests/**/*.test.js\"",
+    "demo:webhook": "node scripts/simular-webhook.js"
+  }
+}
